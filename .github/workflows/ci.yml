@@ -1,0 +1,146 @@
+name: ci
+
+on:
+  pull_request:                # gates every PR
+  push:
+    branches: [main]           # main also builds + publishes
+  workflow_dispatch:           # manual demo / hotfix runs
+
+permissions:
+  contents: read               # least privilege default
+
+concurrency:
+  group: ci-${{ github.ref }}  # cancel superseded runs
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Cheapest gate first: style, architecture and types, in seconds. Nothing
+  # expensive runs until this is green.
+  # ---------------------------------------------------------------------------
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+
+      - run: pip install -e ".[dev,api]" mypy import-linter
+
+      - name: Ruff (style + import layer rules)
+        run: ruff check src tests
+
+      - name: Import-linter (architecture contract)
+        run: lint-imports
+
+      - name: Mypy (type-check the seams)
+        run: mypy src/fraud_service --strict
+
+  # ---------------------------------------------------------------------------
+  # The same two commands a developer runs locally after Lab 4. CI is not a new
+  # suite -- it is the existing one, running whether or not anyone remembers.
+  # ---------------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+
+      # Each job gets a brand-new VM with nothing installed. This line is not a
+      # duplicate of the lint job's -- it is the reason the test job can import
+      # fraud_service at all.
+      - run: pip install -e ".[dev,api]"
+
+      - name: Fast suite — the per-commit gate
+        run: pytest -m "not slow" --cov-fail-under=80
+
+      - name: Behavioural gate — real model artefact
+        run: pytest -m "behavioural and not slow" -q
+
+      # `always()` so the evidence lands on the PR even when the job fails --
+      # which is exactly when someone will want to read it.
+      - name: Upload coverage (evidence, even on fail)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: .coverage
+
+  # ---------------------------------------------------------------------------
+  # Build once, then prove the artefact actually serves traffic. A green unit
+  # suite says nothing about whether the image starts.
+  # ---------------------------------------------------------------------------
+  image-smoke:
+    runs-on: ubuntu-latest
+    needs: [lint, test]        # gated by the cheap checks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build with GHA layer cache
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true           # load locally so we can smoke it
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the container
+        run: |
+          docker run -d --name svc -p 8000:8000 \
+            ${{ env.IMAGE }}:${{ github.sha }}
+          # Poll for readiness. A fixed `sleep N` guesses a number and passes
+          # nine times out of ten -- then fails the one time the runner is slow.
+          for i in $(seq 1 30); do
+            curl -fsS localhost:8000/v1/ready && break || sleep 2
+          done
+          curl -fsS localhost:8000/v1/predict \
+               -H "content-type: application/json" \
+               -d @payloads/sample.json \
+          | python3 -c "import json,sys; b=json.load(sys.stdin); \
+                        assert 0<=b['fraud_probability']<=1; \
+                        assert b['model_version']; print('smoke OK')"
+          docker logs svc --tail 5
+
+  # ---------------------------------------------------------------------------
+  # Delivery. The `if:` below is the most important line in this file: fork PRs
+  # run untrusted and are never handed secrets, so a publish job on
+  # pull_request would 403 at best. Restricting it to push-to-main sidesteps
+  # the whole class of problem.
+  # ---------------------------------------------------------------------------
+  publish:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [image-smoke]
+    permissions:
+      contents: read
+      packages: write         # scoped token for GHCR push, no PAT
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push (SHA + channel tag)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:main

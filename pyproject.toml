@@ -56,3 +56,21 @@ omit = ["*/batch.py"]
 [tool.ruff]
 line-length = 100
 src = ["src"]
+
+# --- Architecture contract -------------------------------------------------
+# The same four layers respected by hand since Day 1 (api -> adapters ->
+# service -> domain, never the reverse), now machine-enforced. From this
+# commit on, a domain module importing from fraud_service.api fails the lint
+# job in seconds instead of waiting for whichever reviewer happens to notice.
+[tool.importlinter]
+root_package = "fraud_service"
+
+[[tool.importlinter.contracts]]
+name = "Clean architecture layers"
+type = "layers"
+layers = [
+    "fraud_service.api",
+    "fraud_service.adapters",
+    "fraud_service.service",
+    "fraud_service.domain",
+]
