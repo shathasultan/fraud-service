@@ -64,3 +64,75 @@ _Fill in after Lab 6 Step 3:_
 | p50 latency computed from JSON logs via `jq` | |
 | Fail-fast startup error (bad `FRAUD_MODEL_PATH`) confirmed? | yes / no |
 | `gitleaks` clean on final commit? | yes / no |
+
+## Day 3 — Lab 5 (CI/CD pipeline)
+
+| Metric | Value |
+|---|---|
+| lint job duration | 0.4 s local · see note |
+| test job duration | 5.1 s local (4.1 s fast suite + 1.0 s behavioural) |
+| image-smoke — cold run | _to be read from the Actions UI_ |
+| image-smoke — warm run (GHA cache) | _to be read from the Actions UI_ |
+| bad-pr: blocked by branch protection? | **yes** — see below |
+
+### How these were measured
+
+The `lint` and `test` rows are wall-clock timings of the exact commands the
+workflow runs, on the machine this repository was developed on:
+
+```
+ruff check src tests && lint-imports && mypy src/fraud_service --strict   0.4 s
+pytest -m "not slow" --cov-fail-under=80                                   4.1 s
+pytest -m "behavioural and not slow" -q                                    1.0 s
+```
+
+A GitHub runner will report more than this, because a job's duration also
+includes checking out the repository and installing dependencies. The `cache:
+pip` key on `requirements.lock` is what keeps that install in the single-digit
+seconds after the first run rather than around ninety.
+
+The two `image-smoke` rows are deliberately left for the Actions UI to fill.
+They measure the GHA layer cache — `cache-from: type=gha` — and that cache
+only exists inside GitHub Actions. There is no honest local equivalent: a
+local `docker build` twice in a row measures Docker's own layer cache, which
+is a different mechanism with a different hit rate. Recording a local number
+in those rows would be reporting the wrong measurement under the right label.
+
+Expect the warm run to come in at roughly a third of the cold one or better.
+Course reference shape, for comparison rather than a target: cold ≈ 5 min 40 s,
+warm ≈ 1 min 02 s.
+
+### bad-pr — what each gate caught
+
+Two deliberate breakages on one branch, and each was caught by a different
+job, which is the point of splitting them:
+
+**`lint` — the architecture contract**
+
+```
+Clean architecture layers BROKEN
+fraud_service.domain is not allowed to import fraud_service.api:
+- fraud_service.domain.policies -> fraud_service.api.schemas (l.6)
+Contracts: 0 kept, 1 broken.          exit code 1
+```
+
+**`test` — the boundary regression**
+
+```
+FAILED tests/unit/test_policies.py::test_decision_bands[0.85-block]
+AssertionError: assert 'review' == 'block'
+1 failed, 51 passed
+```
+
+Changing `>=` to `>` moves the exact block threshold out of the "block" band.
+It is a one-character edit that no reviewer reliably catches by eye, and it
+silently lets through the precise case the risk-approved threshold exists to
+stop. The parametrised boundary test catches it in under five seconds.
+
+`image-smoke` declares `needs: [lint, test]`, so it never started. `publish`
+declares `needs: [image-smoke]`, so it never started either. One cheap failure
+stopped the whole pipeline before a single image layer was built.
+
+**The fix was made at the source**, not by weakening a check: the unused
+import was removed and `>=` restored. Neither the test nor the contract was
+touched. All four checks then returned green and the branch merged clean.
