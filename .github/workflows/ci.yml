@@ -65,8 +65,29 @@ jobs:
       - name: Fast suite — the per-commit gate
         run: pytest -m "not slow" --cov-fail-under=80
 
+      # Two deviations from the generic pipeline in the slide deck, both
+      # forced by what this repository actually contains.
+      #
+      # `-m "behavioural"`, not `-m "behavioural and not slow"`. Every test in
+      # tests/behavioural/ carries BOTH marks:
+      #
+      #     pytestmark = [pytest.mark.behavioural, pytest.mark.slow]
+      #
+      # so `behavioural and not slow` is an empty set here -- pytest collects
+      # nothing and exits 5, failing the job while appearing to have run a
+      # gate. That double-marking is correct: these tests load the real model
+      # artefact, which is why the fast suite above excludes them. The step
+      # that exists to run them therefore has to ask for them by name.
+      #
+      # `--no-cov` because `addopts` in pyproject.toml turns coverage on for
+      # every pytest invocation and `fail_under = 80` then judges THIS run too.
+      # Three behavioural tests touch ~65% of the codebase, so the floor fails
+      # a run it was never meant to measure. The coverage gate is not weakened
+      # -- it is enforced in full by the step above, on the whole fast suite.
+      # This also leaves that step's `.coverage` file intact for the upload
+      # below, which otherwise has nothing to upload.
       - name: Behavioural gate — real model artefact
-        run: pytest -m "behavioural and not slow" -q
+        run: pytest -m "behavioural" -q --no-cov
 
       # `always()` so the evidence lands on the PR even when the job fails --
       # which is exactly when someone will want to read it.
