@@ -45,67 +45,41 @@ Image ships as a non-root `appuser`, healthcheck on `/v1/ready`,
 
 ## Day 3 — Lab 5 (CI/CD pipeline)
 
-_Fill in as you complete each step — reference numbers from the course:_
-
 | Metric | Value |
 |---|---|
-| lint job duration | |
-| test job duration | |
-| image-smoke — cold run | ~5 min 40 s (reference) |
-| image-smoke — warm run (GHA cache) | ~1 min 02 s (reference) |
-| bad-pr blocked by branch protection? | yes / no |
+| lint job duration | **35 s** |
+| test job duration | **44 s** |
+| image-smoke — cold run | **111 s** |
+| image-smoke — warm run (GHA cache) | **33 s** |
+| publish job duration | **78 s** |
+| cache speed-up | **3.4×** |
+| bad-pr blocked by branch protection? | **yes** |
 
-## Day 3 — Lab 6 (Config, Secrets & Logs)
+Measured on `ubuntu-latest`, runs
+[#2](https://github.com/shathasultan/fraud-service/actions/runs/35720653766)
+(cold) and
+[#3](https://github.com/shathasultan/fraud-service/actions/runs/35720874880)
+(warm, triggered by an empty commit).
 
-_Fill in after Lab 6 Step 3:_
-
-| Metric | Value |
-|---|---|
-| p50 latency computed from JSON logs via `jq` | |
-| Fail-fast startup error (bad `FRAUD_MODEL_PATH`) confirmed? | yes / no |
-| `gitleaks` clean on final commit? | yes / no |
-
-## Day 3 — Lab 5 (CI/CD pipeline)
-
-| Metric | Value |
-|---|---|
-| lint job duration | 0.4 s local · see note |
-| test job duration | 5.1 s local (4.1 s fast suite + 1.0 s behavioural) |
-| image-smoke — cold run | _to be read from the Actions UI_ |
-| image-smoke — warm run (GHA cache) | _to be read from the Actions UI_ |
-| bad-pr: blocked by branch protection? | **yes** — see below |
-
-### How these were measured
-
-The `lint` and `test` rows are wall-clock timings of the exact commands the
-workflow runs, on the machine this repository was developed on:
+Published image, tagged by commit SHA and never `:latest`:
 
 ```
-ruff check src tests && lint-imports && mypy src/fraud_service --strict   0.4 s
-pytest -m "not slow" --cov-fail-under=80                                   4.1 s
-pytest -m "behavioural and not slow" -q                                    1.0 s
+ghcr.io/shathasultan/fraud-service:128142db72f219677c5e8f2c4366cfeb847e18c4
+digest sha256:a4ce291b92c4846543e85fbe6d9d051c2bd183ab9f84e36a5d328d833cce0315
 ```
 
-A GitHub runner will report more than this, because a job's duration also
-includes checking out the repository and installing dependencies. The `cache:
-pip` key on `requirements.lock` is what keeps that install in the single-digit
-seconds after the first run rather than around ninety.
+Both `image-smoke` rows come from the Actions UI, because they measure the GHA
+layer cache — `cache-from: type=gha` — which exists only inside Actions. A
+local `docker build` run twice measures Docker's own cache: a different
+mechanism with a different hit rate.
 
-The two `image-smoke` rows are deliberately left for the Actions UI to fill.
-They measure the GHA layer cache — `cache-from: type=gha` — and that cache
-only exists inside GitHub Actions. There is no honest local equivalent: a
-local `docker build` twice in a row measures Docker's own layer cache, which
-is a different mechanism with a different hit rate. Recording a local number
-in those rows would be reporting the wrong measurement under the right label.
-
-Expect the warm run to come in at roughly a third of the cold one or better.
-Course reference shape, for comparison rather than a target: cold ≈ 5 min 40 s,
-warm ≈ 1 min 02 s.
+The 3.4× is the whole argument for the cache. Course reference shape, for
+comparison rather than a target: cold ≈ 5 min 40 s, warm ≈ 1 min 02 s — this
+project's image is smaller, so both are lower while the ratio holds.
 
 ### bad-pr — what each gate caught
 
-Two deliberate breakages on one branch, and each was caught by a different
-job, which is the point of splitting them:
+Two deliberate breakages on one branch, each caught by a different job.
 
 **`lint` — the architecture contract**
 
@@ -124,15 +98,23 @@ AssertionError: assert 'review' == 'block'
 1 failed, 51 passed
 ```
 
-Changing `>=` to `>` moves the exact block threshold out of the "block" band.
-It is a one-character edit that no reviewer reliably catches by eye, and it
-silently lets through the precise case the risk-approved threshold exists to
-stop. The parametrised boundary test catches it in under five seconds.
+Changing `>=` to `>` moves the exact block threshold out of the block band. A
+one-character edit no reviewer reliably catches by eye, letting through the
+precise case the risk-approved threshold exists to stop.
 
-`image-smoke` declares `needs: [lint, test]`, so it never started. `publish`
-declares `needs: [image-smoke]`, so it never started either. One cheap failure
-stopped the whole pipeline before a single image layer was built.
+`image-smoke` needs `[lint, test]`, so it never started. `publish` needs
+`[image-smoke]`, so it never started either. One cheap failure stopped the
+pipeline before a single image layer was built.
 
-**The fix was made at the source**, not by weakening a check: the unused
-import was removed and `>=` restored. Neither the test nor the contract was
-touched. All four checks then returned green and the branch merged clean.
+**Fixed at the source**: the import removed, `>=` restored. Neither the test
+nor the contract was touched.
+
+## Day 3 — Lab 6 (Config, Secrets & Logs)
+
+_Fill in after Lab 6 Step 3:_
+
+| Metric | Value |
+|---|---|
+| p50 latency computed from JSON logs via `jq` | |
+| Fail-fast startup error (bad `FRAUD_MODEL_PATH`) confirmed? | yes / no |
+| `gitleaks` clean on final commit? | yes / no |
